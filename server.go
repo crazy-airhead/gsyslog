@@ -2,28 +2,30 @@ package gsyslog
 
 import (
 	"context"
-	"github.com/crazy-airhead/gsyslog/format"
+	"github.com/crazy-airhead/gsyslog/codec"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
 	"github.com/panjf2000/gnet/v2/pkg/pool/goroutine"
+	"strings"
 )
 
 var (
-	RFC3164   = &format.RFC3164{}   // RFC3164: http://www.ietf.org/rfc/rfc3164.txt
-	RFC5424   = &format.RFC5424{}   // RFC5424: http://www.ietf.org/rfc/rfc5424.txt
-	RFC6587   = &format.RFC6587{}   // RFC6587: http://www.ietf.org/rfc/rfc6587.txt - octet counting variant
-	Automatic = &format.Automatic{} // Automatically identify the format
+	RFC3164Codec   = &codec.RFC3164Codec{}   // RFC3164: http://www.ietf.org/rfc/rfc3164.txt
+	RFC5424Codec   = &codec.RFC5424Codec{}   // RFC5424: http://www.ietf.org/rfc/rfc5424.txt
+	RFC6587Codec   = &codec.RFC6587Codec{}   // RFC6587: http://www.ietf.org/rfc/rfc6587.txt - octet counting variant
+	AutomaticCodec = &codec.AutomaticCodec{} // Automatically identify the codec
 )
 
 type Server struct {
 	gnet.BuiltinEventEngine
-	eng  gnet.Engine
-	addr string
+	eng     gnet.Engine
+	addr    string
+	network string
 
 	bufferSize int
 	workerPool *goroutine.Pool
 
-	format  format.Format
+	codec   codec.Codec
 	handler Handler
 }
 
@@ -31,6 +33,7 @@ type Server struct {
 func NewServer() *Server {
 	return &Server{
 		handler:    NewDefaultHandler(),
+		codec:      AutomaticCodec,
 		workerPool: goroutine.Default(),
 	}
 }
@@ -40,9 +43,9 @@ func (s *Server) SetHandler(handler Handler) {
 	s.handler = handler
 }
 
-// SetFormat Sets the syslog format (RFC3164 or RFC5424 or RFC6587)
-func (s *Server) SetFormat(f format.Format) {
-	s.format = f
+// SetCodec Sets the syslog codec (RFC3164 or RFC5424 or RFC6587)
+func (s *Server) SetCodec(f codec.Codec) {
+	s.codec = f
 }
 
 // SetBufferSize Sets the maximum buffer size
@@ -52,7 +55,16 @@ func (s *Server) SetBufferSize(i int) {
 
 // SetBufferSize Sets the maximum buffer size
 func (s *Server) SetAddr(addr string) {
-	s.addr = addr
+	if strings.HasPrefix(addr, "udp://") {
+		s.network = "udp"
+		s.addr = addr
+	} else if strings.HasPrefix(addr, "tcp://") {
+		s.network = "tcp"
+		s.addr = addr
+	} else if strings.HasPrefix(addr, "unix://") {
+		s.network = "tcp"
+		s.addr = addr
+	}
 }
 
 func (s *Server) Boot() error {
@@ -81,37 +93,68 @@ func (s *Server) OnBoot(eng gnet.Engine) gnet.Action {
 	return gnet.None
 }
 
-func (s *Server) OnTraffic(c gnet.Conn) gnet.Action {
-	data, err := c.Next(-1)
+func (s *Server) OnTraffic(conn gnet.Conn) (action gnet.Action) {
+	if s.network == "udp" {
+		return s.handleUdp(conn)
+	}
+
+	if s.network == "tcp" {
+		return s.handleTcp(conn)
+	}
+
+	if s.network == "unix" {
+		return s.handleUdp(conn)
+	}
+
+	return gnet.None
+}
+
+func (s *Server) handleUdp(conn gnet.Conn) (action gnet.Action) {
+	data, err := conn.Next(-1)
 	if err != nil {
-		logging.Errorf("syslog read loop, something wrong, error:%v", err)
+		logging.Errorf("syslog read buff, something wrong, error:%v", err)
 		return gnet.None
 	}
 
-	task := func(client string, data []byte) {
-		if sf := s.format.GetSplitFunc(); sf != nil {
-			if _, token, err := sf(data, true); err == nil {
-				s.parser(token, client, "")
-			}
-		} else {
-			s.parser(data, client, "")
-		}
-	}
-
-	client := c.RemoteAddr().String()
-	//copyData := make([]byte, len(data))
-	//copy(copyData, data)
+	client := conn.RemoteAddr().String()
+	copyData := make([]byte, len(data))
+	copy(copyData, data)
 	_ = s.workerPool.Submit(func() {
-		task(client, data)
+		s.parser(copyData, client)
 	})
 
 	return gnet.None
 }
 
-func (s *Server) parser(line []byte, client string, tlsPeer string) {
-	parser := s.format.GetParser(line)
-	err := parser.Parse(client, tlsPeer)
-	logParts := parser.Dump()
+func (s *Server) handleTcp(conn gnet.Conn) (action gnet.Action) {
+	for {
+		data, err := s.codec.Decode(conn)
+		if err != nil {
+			break
+		}
 
-	s.handler.Handle(logParts, err)
+		client := conn.RemoteAddr().String()
+		_ = s.workerPool.Submit(func() {
+			s.parser(data, client)
+		})
+
+		return gnet.None
+	}
+
+	if conn.InboundBuffered() > 0 {
+		if err := conn.Wake(nil); err != nil { // wake up the connection manually to avoid missing the leftover data
+			logging.Errorf("failed to wake up the connection, %v", err)
+			return gnet.Close
+		}
+	}
+
+	return gnet.None
+
+}
+
+func (s *Server) parser(line []byte, client string) {
+	parser := s.codec.GetParser(line)
+	log, _ := parser.Parse(line, client)
+
+	s.handler.Handle(log)
 }

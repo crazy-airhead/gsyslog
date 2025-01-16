@@ -15,31 +15,30 @@ const (
 )
 
 var (
-	ErrEOL     = &ParserError{"End of log line"}
-	ErrNoSpace = &ParserError{"No space found"}
+	ErrEOL     = &Error{Msg: "End of log line"}
+	ErrNoSpace = &Error{Msg: "No space found"}
 
-	ErrPriorityNoStart  = &ParserError{"No start char found for priority"}
-	ErrPriorityEmpty    = &ParserError{"Priority field empty"}
-	ErrPriorityNoEnd    = &ParserError{"No end char found for priority"}
-	ErrPriorityTooShort = &ParserError{"Priority field too short"}
-	ErrPriorityTooLong  = &ParserError{"Priority field too long"}
-	ErrPriorityNonDigit = &ParserError{"Non digit found in priority"}
+	ErrPriorityNoStart  = &Error{Msg: "No start char found for priority"}
+	ErrPriorityEmpty    = &Error{Msg: "Priority field empty"}
+	ErrPriorityNoEnd    = &Error{Msg: "No end char found for priority"}
+	ErrPriorityTooShort = &Error{Msg: "Priority field too short"}
+	ErrPriorityTooLong  = &Error{Msg: "Priority field too long"}
+	ErrPriorityNonDigit = &Error{Msg: "Non digit found in priority"}
 
-	ErrVersionNotFound = &ParserError{"Can not find version"}
+	ErrVersionNotFound = &Error{Msg: "Can not find version"}
 
-	ErrTimestampUnknownFormat = &ParserError{"Timestamp format unknown"}
+	ErrTimestampUnknownFormat = &Error{Msg: "Timestamp codec unknown"}
 
-	ErrHostnameTooShort = &ParserError{"Hostname field too short"}
+	ErrHostnameTooShort = &Error{Msg: "Hostname field too short"}
 )
 
-type LogParser interface {
-	Parse(client string, tlsPeer string) error
-	Dump() *Log
+type Parser interface {
+	Parse(data []byte, client string) (*Log, error)
 	Location(*time.Location)
 }
 
-type ParserError struct {
-	ErrorString string
+type Error struct {
+	Msg string
 }
 
 type Priority struct {
@@ -55,8 +54,6 @@ type Facility struct {
 type Severity struct {
 	Value int
 }
-
-//type LogParts map[string]interface{}
 
 // ParsePriority https://tools.ietf.org/html/rfc3164#section-4.1
 func ParsePriority(buff []byte, cursor *int, l int) (Priority, error) {
@@ -208,6 +205,6 @@ func ShowCursorPos(buff []byte, cursor int) {
 	fmt.Println(padding + "↑\n")
 }
 
-func (err *ParserError) Error() string {
-	return err.ErrorString
+func (err *Error) Error() string {
+	return err.Msg
 }

@@ -9,44 +9,26 @@ import (
 )
 
 const (
-	NILVALUE = '-'
+	NilValue = '-'
 )
 
 var (
-	ErrYearInvalid       = &parser.ParserError{"Invalid year in timestamp"}
-	ErrMonthInvalid      = &parser.ParserError{"Invalid month in timestamp"}
-	ErrDayInvalid        = &parser.ParserError{"Invalid day in timestamp"}
-	ErrHourInvalid       = &parser.ParserError{"Invalid hour in timestamp"}
-	ErrMinuteInvalid     = &parser.ParserError{"Invalid minute in timestamp"}
-	ErrSecondInvalid     = &parser.ParserError{"Invalid second in timestamp"}
-	ErrSecFracInvalid    = &parser.ParserError{"Invalid fraction of second in timestamp"}
-	ErrTimeZoneInvalid   = &parser.ParserError{"Invalid time zone in timestamp"}
-	ErrInvalidTimeFormat = &parser.ParserError{"Invalid time format"}
-	ErrInvalidAppName    = &parser.ParserError{"Invalid app name"}
-	ErrInvalidProcId     = &parser.ParserError{"Invalid proc ID"}
-	ErrInvalidMsgId      = &parser.ParserError{"Invalid msg ID"}
-	ErrNoStructuredData  = &parser.ParserError{"No structured data"}
+	ErrYearInvalid       = &parser.Error{Msg: "Invalid year in timestamp"}
+	ErrMonthInvalid      = &parser.Error{Msg: "Invalid month in timestamp"}
+	ErrDayInvalid        = &parser.Error{Msg: "Invalid day in timestamp"}
+	ErrHourInvalid       = &parser.Error{Msg: "Invalid hour in timestamp"}
+	ErrMinuteInvalid     = &parser.Error{Msg: "Invalid minute in timestamp"}
+	ErrSecondInvalid     = &parser.Error{Msg: "Invalid second in timestamp"}
+	ErrSecFracInvalid    = &parser.Error{Msg: "Invalid fraction of second in timestamp"}
+	ErrTimeZoneInvalid   = &parser.Error{Msg: "Invalid time zone in timestamp"}
+	ErrInvalidTimeFormat = &parser.Error{Msg: "Invalid time codec"}
+	ErrInvalidAppName    = &parser.Error{Msg: "Invalid app name"}
+	ErrInvalidProcId     = &parser.Error{Msg: "Invalid proc ID"}
+	ErrInvalidMsgId      = &parser.Error{Msg: "Invalid msg ID"}
+	ErrNoStructuredData  = &parser.Error{Msg: "No structured data"}
 )
 
 type Parser struct {
-	buff           []byte
-	cursor         int
-	l              int
-	header         header
-	structuredData string
-	message        string
-	client         string
-	tlsPeer        string
-}
-
-type header struct {
-	priority  parser.Priority
-	version   int
-	timestamp time.Time
-	hostname  string
-	appName   string
-	procId    string
-	msgId     string
 }
 
 type partialTime struct {
@@ -67,161 +49,170 @@ type fullDate struct {
 	day   int
 }
 
-func NewParser(buff []byte) *Parser {
-	return &Parser{
-		buff:   buff,
-		cursor: 0,
-		l:      len(buff),
-	}
+func NewParser() *Parser {
+	return &Parser{}
 }
 
 func (p *Parser) Location(location *time.Location) {
 	// Ignore as RFC5424 syslog always has a timezone
 }
 
-func (p *Parser) Parse(client string, tlsPeer string) error {
-	hdr, err := p.parseHeader()
+func (p *Parser) Parse(data []byte, client string) (*parser.Log, error) {
+	log := parser.NewLog(data)
+	err := p.parseHeader(log)
+	if err != nil {
+		log.Err = err
+		return log, err
+	}
+
+	err = p.parseStructuredData(log)
+	if err != nil {
+		log.Err = err
+		return log, err
+	}
+
+	log.MoveCursor()
+
+	if log.Cursor() < log.Len() {
+		log.SetMessage(string(log.Body[log.Cursor():]))
+	} else {
+		log.SetMessage("")
+	}
+
+	return log, nil
+}
+
+// HEADER = PRI VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID
+func (p *Parser) parseHeader(log *parser.Log) error {
+	err := parsePriority(log)
 	if err != nil {
 		return err
 	}
 
-	p.header = hdr
-
-	sd, err := p.parseStructuredData()
+	err = parseVersion(log)
 	if err != nil {
 		return err
 	}
 
-	p.structuredData = sd
-	p.cursor++
+	// move over a blank
+	log.MoveCursor()
 
-	if p.cursor < p.l {
-		p.message = string(p.buff[p.cursor:])
+	err = p.parseTimestamp(log)
+	if err != nil {
+		return err
 	}
 
-	p.client = client
-	p.tlsPeer = tlsPeer
+	// move over a blank
+	log.MoveCursor()
+
+	err = parseHostname(log)
+	if err != nil {
+		return err
+	}
+
+	// move over a blank
+	log.MoveCursor()
+
+	err = parseAppName(log)
+	if err != nil {
+		return err
+	}
+
+	// move over a blank
+	log.MoveCursor()
+
+	err = parseProcId(log)
+	if err != nil {
+		return nil
+	}
+
+	// move over a blank
+	log.MoveCursor()
+
+	err = parseMsgId(log)
+	if err != nil {
+		return nil
+	}
+
+	// move over a blank
+	log.MoveCursor()
 
 	return nil
 }
 
-func (p *Parser) Dump() *parser.Log {
-	return parser.NewLog(map[string]interface{}{
-		"priority":        p.header.priority.P,
-		"facility":        p.header.priority.F.Value,
-		"severity":        p.header.priority.S.Value,
-		"version":         p.header.version,
-		"timestamp":       p.header.timestamp,
-		"hostname":        p.header.hostname,
-		"app_name":        p.header.appName,
-		"proc_id":         p.header.procId,
-		"msg_id":          p.header.msgId,
-		"structured_data": p.structuredData,
-		"message":         p.message,
-	}, p.buff)
+func parsePriority(log *parser.Log) error {
+	cursor := log.Cursor()
+	priority, err := parser.ParsePriority(log.Body, &cursor, log.Len())
+	if err != nil {
+		// RFC3164 sec 4.3.3
+		log.SetPriority(13)
+		log.SetFacility(1)
+		log.SetSeverity(5)
+
+		return err
+	}
+
+	log.SetPriority(priority.P)
+	log.SetFacility(priority.F.Value)
+	log.SetSeverity(priority.S.Value)
+
+	// 成功移动光标
+	log.SetCursor(cursor)
+
+	return nil
 }
 
-// HEADER = PRI VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID
-func (p *Parser) parseHeader() (header, error) {
-	hdr := header{}
-
-	pri, err := p.parsePriority()
+func parseVersion(log *parser.Log) error {
+	cursor := log.Cursor()
+	version, err := parser.ParseVersion(log.Body, &cursor, log.Len())
 	if err != nil {
-		return hdr, err
+		return err
 	}
 
-	hdr.priority = pri
+	log.SetVersion(version)
 
-	ver, err := p.parseVersion()
-	if err != nil {
-		return hdr, err
-	}
-	hdr.version = ver
-	p.cursor++
+	// 成功移动光标
+	log.SetCursor(cursor)
 
-	ts, err := p.parseTimestamp()
-	if err != nil {
-		return hdr, err
-	}
-
-	hdr.timestamp = ts
-	p.cursor++
-
-	host, err := p.parseHostname()
-	if err != nil {
-		return hdr, err
-	}
-
-	hdr.hostname = host
-	p.cursor++
-
-	appName, err := p.parseAppName()
-	if err != nil {
-		return hdr, err
-	}
-
-	hdr.appName = appName
-	p.cursor++
-
-	procId, err := p.parseProcId()
-	if err != nil {
-		return hdr, nil
-	}
-
-	hdr.procId = procId
-	p.cursor++
-
-	msgId, err := p.parseMsgId()
-	if err != nil {
-		return hdr, nil
-	}
-
-	hdr.msgId = msgId
-	p.cursor++
-
-	return hdr, nil
-}
-
-func (p *Parser) parsePriority() (parser.Priority, error) {
-	return parser.ParsePriority(p.buff, &p.cursor, p.l)
-}
-
-func (p *Parser) parseVersion() (int, error) {
-	return parser.ParseVersion(p.buff, &p.cursor, p.l)
+	return nil
 }
 
 // https://tools.ietf.org/html/rfc5424#section-6.2.3
-func (p *Parser) parseTimestamp() (time.Time, error) {
+func (p *Parser) parseTimestamp(log *parser.Log) error {
 	var ts time.Time
 
-	if p.cursor >= p.l {
-		return ts, ErrInvalidTimeFormat
+	cursor := log.Cursor()
+	if cursor >= log.Len() {
+		return ErrInvalidTimeFormat
 	}
 
-	if p.buff[p.cursor] == NILVALUE {
-		p.cursor++
-		return ts, nil
+	if log.Body[cursor] == NilValue {
+		log.MoveCursor()
+		return nil
 	}
 
-	fd, err := parseFullDate(p.buff, &p.cursor, p.l)
+	fd, err := parseFullDate(log.Body, &cursor, log.Len())
 	if err != nil {
-		return ts, err
+		return err
 	}
 
-	if p.cursor >= p.l || p.buff[p.cursor] != 'T' {
-		return ts, ErrInvalidTimeFormat
+	if cursor >= log.Len() || log.Body[cursor] != 'T' {
+		log.SetCursor(cursor)
+		return ErrInvalidTimeFormat
 	}
 
-	p.cursor++
+	cursor++
 
-	ft, err := parseFullTime(p.buff, &p.cursor, p.l)
+	ft, err := parseFullTime(log.Body, &cursor, log.Len())
 	if err != nil {
-		return ts, parser.ErrTimestampUnknownFormat
+		log.SetCursor(cursor)
+		return parser.ErrTimestampUnknownFormat
 	}
 
 	nSec, err := toNSec(ft.pt.secFrac)
 	if err != nil {
-		return ts, err
+		log.SetCursor(cursor)
+		return err
 	}
 
 	ts = time.Date(
@@ -235,38 +226,77 @@ func (p *Parser) parseTimestamp() (time.Time, error) {
 		ft.loc,
 	)
 
-	return ts, nil
+	log.SetTimestamp(ts)
+
+	//成功，设置光标
+	log.SetCursor(cursor)
+
+	return nil
 }
 
-// HOSTNAME = NILVALUE / 1*255PRINTUSASCII
-func (p *Parser) parseHostname() (string, error) {
-	return parser.ParseHostname(p.buff, &p.cursor, p.l)
+// HOSTNAME = NilValue / 1*255PRINTUSASCII
+func parseHostname(log *parser.Log) error {
+	cursor := log.Cursor()
+	hostname, err := parser.ParseHostname(log.Body, &cursor, log.Len())
+	if err != nil {
+		return err
+	}
+
+	log.SetHostname(hostname)
+	log.SetCursor(cursor)
+	return nil
 }
 
-// APP-NAME = NILVALUE / 1*48PRINTUSASCII
-func (p *Parser) parseAppName() (string, error) {
-	return parseUpToLen(p.buff, &p.cursor, p.l, 48, ErrInvalidAppName)
+// APP-NAME = NilValue / 1*48PRINTUSASCII
+func parseAppName(log *parser.Log) error {
+	cursor := log.Cursor()
+	appName, err := parseUpToLen(log.Body, &cursor, log.Len(), 48, ErrInvalidAppName)
+	if err != nil {
+		return err
+	}
+
+	log.SetAppName(appName)
+	log.SetCursor(cursor)
+	return nil
 }
 
-// PROCID = NILVALUE / 1*128PRINTUSASCII
-func (p *Parser) parseProcId() (string, error) {
-	return parseUpToLen(p.buff, &p.cursor, p.l, 128, ErrInvalidProcId)
+// PROCID = NilValue / 1*128PRINTUSASCII
+func parseProcId(log *parser.Log) error {
+	cursor := log.Cursor()
+	procId, err := parseUpToLen(log.Body, &cursor, log.Len(), 128, ErrInvalidAppName)
+	if err != nil {
+		return err
+	}
+
+	log.SetProcId(procId)
+	log.SetCursor(cursor)
+	return nil
 }
 
-// MSGID = NILVALUE / 1*32PRINTUSASCII
-func (p *Parser) parseMsgId() (string, error) {
-	return parseUpToLen(p.buff, &p.cursor, p.l, 32, ErrInvalidMsgId)
+// MSGID = NilValue / 1*32PRINTUSASCII
+func parseMsgId(log *parser.Log) error {
+	cursor := log.Cursor()
+	msgId, err := parseUpToLen(log.Body, &cursor, log.Len(), 32, ErrInvalidAppName)
+	if err != nil {
+		return err
+	}
+
+	log.SetMsgId(msgId)
+	log.SetCursor(cursor)
+	return nil
 }
 
-func (p *Parser) parseStructuredData() (string, error) {
-	return parseStructuredData(p.buff, &p.cursor, p.l)
+func (p *Parser) parseStructuredData(log *parser.Log) error {
+	cursor := log.Cursor()
+	sd, err := parseStructuredData(log.Body, &cursor, log.Len())
+	if err != nil {
+		return err
+	}
+
+	log.SetStructuredData(sd)
+	log.SetCursor(cursor)
+	return nil
 }
-
-// ----------------------------------------------
-// https://tools.ietf.org/html/rfc5424#section-6
-// ----------------------------------------------
-
-// XXX : bind them to LogParser ?
 
 // FULL-DATE : DATE-FULLYEAR "-" DATE-MONTH "-" DATE-MDAY
 func parseFullDate(buff []byte, cursor *int, l int) (fullDate, error) {
@@ -540,7 +570,7 @@ func parseStructuredData(buff []byte, cursor *int, l int) (string, error) {
 		return "-", nil
 	}
 
-	if buff[*cursor] == NILVALUE {
+	if buff[*cursor] == NilValue {
 		*cursor++
 		return "-", nil
 	}

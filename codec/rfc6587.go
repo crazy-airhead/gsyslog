@@ -1,21 +1,21 @@
-package format
+package codec
 
 import (
-	"bufio"
 	"bytes"
 	"github.com/crazy-airhead/gsyslog/parser"
 	"github.com/crazy-airhead/gsyslog/parser/rfc5424"
+	"github.com/panjf2000/gnet/v2"
 	"strconv"
 )
 
-type RFC6587 struct{}
+type RFC6587Codec struct{}
 
-func (f *RFC6587) GetParser(line []byte) parser.LogParser {
-	return &parserWrapper{rfc5424.NewParser(line)}
+func (f *RFC6587Codec) GetParser(data []byte) parser.Parser {
+	return rfc5424.NewParser()
 }
 
-func (f *RFC6587) GetSplitFunc() bufio.SplitFunc {
-	return rfc6587ScannerSplit
+func (f *RFC6587Codec) Decode(conn gnet.Conn) ([]byte, error) {
+	return nil, nil
 }
 
 func rfc6587ScannerSplit(data []byte, atEOF bool) (advance int, token []byte, err error) {

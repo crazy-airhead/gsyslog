@@ -2,6 +2,7 @@ package rfc3164
 
 import (
 	"bytes"
+	"errors"
 	"github.com/crazy-airhead/gsyslog/parser"
 	"os"
 	"strings"
@@ -9,34 +10,11 @@ import (
 )
 
 type Parser struct {
-	buff     []byte
-	cursor   int
-	l        int
-	priority parser.Priority
-	version  int
-	header   header
-	message  rfc3164message
 	location *time.Location
-	skipTag  bool
-	client   string
-	tlsPeer  string
 }
 
-type header struct {
-	timestamp time.Time
-	hostname  string
-}
-
-type rfc3164message struct {
-	tag     string
-	content string
-}
-
-func NewParser(buff []byte) *Parser {
+func NewParser() *Parser {
 	return &Parser{
-		buff:     buff,
-		cursor:   0,
-		l:        len(buff),
 		location: time.UTC,
 	}
 }
@@ -45,112 +23,87 @@ func (p *Parser) Location(location *time.Location) {
 	p.location = location
 }
 
-func (p *Parser) Parse(client string, tlsPeer string) error {
-	tcursor := p.cursor
-	pri, err := p.parsePriority()
+func (p *Parser) Parse(data []byte, client string) (*parser.Log, error) {
+	log := parser.NewLog(data)
+	log.SetClient(client)
+
+	err := parsePriority(log)
+	if err != nil {
+		log.SetTimestamp(time.Now().Round(time.Second))
+		log.SetHostname("")
+
+		log.SetTag("")
+		err = parseContent(log)
+		log.Err = err
+		return log, err
+	}
+
+	tCursor := log.Cursor()
+	err = p.parseHeader(log)
+	if errors.Is(err, parser.ErrTimestampUnknownFormat) {
+		// RFC3164 sec 4.3.2.
+		log.SetTimestamp(time.Now().Round(time.Second))
+		log.SetHostname("")
+
+		// No tag processing should be done
+		log.SetSkipTag(true)
+		// Reset cursor for content read
+		log.SetCursor(tCursor)
+	} else if err != nil {
+		log.Err = err
+		return log, nil
+	} else {
+		log.MoveCursor()
+	}
+
+	err = parseMessage(log)
+	if !errors.Is(err, parser.ErrEOL) {
+		log.Err = err
+		return log, err
+	}
+
+	return log, nil
+}
+
+// parsePriority 识别成功时移动光标，未成功时不移动
+func parsePriority(log *parser.Log) error {
+	cursor := log.Cursor()
+	priority, err := parser.ParsePriority(log.Body, &cursor, log.Len())
 	if err != nil {
 		// RFC3164 sec 4.3.3
-		p.priority = parser.Priority{13, parser.Facility{Value: 1}, parser.Severity{Value: 5}}
-		p.cursor = tcursor
-		content, err := p.parseContent()
-		p.header.timestamp = time.Now().Round(time.Second)
-		if err != parser.ErrEOL {
-			return err
-		}
-		p.message = rfc3164message{content: content}
-		return nil
-	}
+		log.SetPriority(13)
+		log.SetFacility(1)
+		log.SetSeverity(5)
 
-	tcursor = p.cursor
-	hdr, err := p.parseHeader()
-	if err == parser.ErrTimestampUnknownFormat {
-		// RFC3164 sec 4.3.2.
-		hdr.timestamp = time.Now().Round(time.Second)
-		// No tag processing should be done
-		p.skipTag = true
-		// Reset cursor for content read
-		p.cursor = tcursor
-	} else if err != nil {
-		return err
-	} else {
-		p.cursor++
-	}
-
-	msg, err := p.parsemessage()
-	if err != parser.ErrEOL {
 		return err
 	}
 
-	p.priority = pri
-	p.version = parser.NoVersion
-	p.header = hdr
-	p.message = msg
-	p.client = client
-	p.tlsPeer = tlsPeer
+	log.SetPriority(priority.P)
+	log.SetFacility(priority.F.Value)
+	log.SetSeverity(priority.S.Value)
+
+	// 成功移动光标
+	log.SetCursor(cursor)
 
 	return nil
 }
 
-func (p *Parser) Dump() *parser.Log {
-	return parser.NewLog(map[string]interface{}{
-		"timestamp": p.header.timestamp,
-		"hostname":  p.header.hostname,
-		"tag":       p.message.tag,
-		"content":   p.message.content,
-		"priority":  p.priority.P,
-		"facility":  p.priority.F.Value,
-		"severity":  p.priority.S.Value,
-	}, p.buff)
-}
-
-func (p *Parser) parsePriority() (parser.Priority, error) {
-	return parser.ParsePriority(p.buff, &p.cursor, p.l)
-}
-
-func (p *Parser) parseHeader() (header, error) {
-	hdr := header{}
-	var err error
-
-	ts, err := p.parseTimestamp()
+func (p *Parser) parseHeader(log *parser.Log) error {
+	err := parseTimestamp(log, p.location)
 	if err != nil {
-		return hdr, err
+		return err
 	}
 
-	hostname, err := p.parseHostname()
+	err = parseHostname(log)
 	if err != nil {
-		return hdr, err
+		return err
 	}
 
-	hdr.timestamp = ts
-	hdr.hostname = hostname
-
-	return hdr, nil
-}
-
-func (p *Parser) parsemessage() (rfc3164message, error) {
-	msg := rfc3164message{}
-	var err error
-
-	if !p.skipTag {
-		tag, err := p.parseTag()
-		if err != nil {
-			return msg, err
-		}
-		msg.tag = tag
-	}
-
-	content, err := p.parseContent()
-	if err != parser.ErrEOL {
-		return msg, err
-	}
-
-	msg.content = content
-
-	return msg, err
+	return nil
 }
 
 // https://tools.ietf.org/html/rfc3164#section-4.1.2
-func (p *Parser) parseTimestamp() (time.Time, error) {
+func parseTimestamp(log *parser.Log, location *time.Location) error {
 	var ts time.Time
 	var err error
 	var tsFmtLen int
@@ -162,7 +115,8 @@ func (p *Parser) parseTimestamp() (time.Time, error) {
 	}
 	// if timestamps starts with numeric try formats with different order
 	// it is more likely that timestamp is in RFC3339 format then
-	if c := p.buff[p.cursor]; c > '0' && c < '9' {
+	cursor := log.Cursor()
+	if c := log.Body[cursor]; c > '0' && c < '9' {
 		tsFmts = []string{
 			time.RFC3339,
 			time.Stamp,
@@ -173,12 +127,12 @@ func (p *Parser) parseTimestamp() (time.Time, error) {
 	for _, tsFmt := range tsFmts {
 		tsFmtLen = len(tsFmt)
 
-		if p.cursor+tsFmtLen > p.l {
+		if cursor+tsFmtLen > log.Len() {
 			continue
 		}
 
-		sub = p.buff[p.cursor : tsFmtLen+p.cursor]
-		ts, err = time.ParseInLocation(tsFmt, string(sub), p.location)
+		sub = log.Body[cursor : tsFmtLen+cursor]
+		ts, err = time.ParseInLocation(tsFmt, string(sub), location)
 		if err == nil {
 			found = true
 			break
@@ -186,54 +140,74 @@ func (p *Parser) parseTimestamp() (time.Time, error) {
 	}
 
 	if !found {
-		p.cursor = len(time.Stamp)
+		cursor = len(time.Stamp)
 
 		// XXX : If the timestamp is invalid we try to push the cursor one byte
 		// XXX : further, in case it is a space
-		if (p.cursor < p.l) && (p.buff[p.cursor] == ' ') {
-			p.cursor++
+		if (cursor < log.Len()) && (log.Body[cursor] == ' ') {
+			cursor++
 		}
 
-		return ts, parser.ErrTimestampUnknownFormat
+		log.SetCursor(cursor)
+		log.SetTimestamp(ts)
+		return parser.ErrTimestampUnknownFormat
 	}
 
 	fixTimestampIfNeeded(&ts)
 
-	p.cursor += tsFmtLen
+	cursor += tsFmtLen
 
-	if (p.cursor < p.l) && (p.buff[p.cursor] == ' ') {
-		p.cursor++
+	if (cursor < log.Len()) && (log.Body[cursor] == ' ') {
+		cursor++
 	}
 
-	return ts, nil
+	log.SetCursor(cursor)
+	log.SetTimestamp(ts)
+	return nil
 }
 
-func (p *Parser) parseHostname() (string, error) {
-	oldcursor := p.cursor
-	hostname, err := parser.ParseHostname(p.buff, &p.cursor, p.l)
+func parseHostname(log *parser.Log) error {
+	cursor := log.Cursor()
+	hostname, err := parser.ParseHostname(log.Body, &cursor, log.Len())
 	if err == nil && len(hostname) > 0 && string(hostname[len(hostname)-1]) == ":" { // not an hostname! we found a GNU implementation of syslog()
-		p.cursor = oldcursor - 1
-		myhostname, err := os.Hostname()
+		log.MoveCursorN(-1)
+		hostname, err = os.Hostname()
 		if err == nil {
-			return myhostname, nil
+			log.SetHostname(hostname)
+			return nil
 		}
-		return "", nil
+
+		log.SetHostname("")
+		fixHostname(log)
+		return nil
 	}
 
-	// 如果解析不成功，从client中获取
-	if hostname == "" {
-		if i := strings.Index(p.client, ":"); i > 1 {
-			hostname = p.client[:i]
-		} else {
-			hostname = p.client
+	log.SetHostname(hostname)
+	fixHostname(log)
+	log.SetCursor(cursor)
+	return err
+}
+
+func parseMessage(log *parser.Log) error {
+	if !log.SkipTag() {
+		err := parseTag(log)
+		if err != nil {
+			return err
 		}
+	} else {
+		log.SetTag("")
 	}
 
-	return hostname, err
+	err := parseContent(log)
+	if !errors.Is(err, parser.ErrEOL) {
+		return err
+	}
+
+	return err
 }
 
 // http://tools.ietf.org/html/rfc3164#section-4.1.3
-func (p *Parser) parseTag() (string, error) {
+func parseTag(log *parser.Log) error {
 	var b byte
 	var endOfTag bool
 	var bracketOpen bool
@@ -241,54 +215,58 @@ func (p *Parser) parseTag() (string, error) {
 	var err error
 	var found bool
 
-	from := p.cursor
-
+	from := log.Cursor()
+	cursor := log.Cursor()
 	for {
-		if p.cursor == p.l {
-			// no tag found, reset cursor for content
-			p.cursor = from
-			return "", nil
+		if cursor == log.Len() {
+			log.SetTag("")
+			return nil
 		}
 
-		b = p.buff[p.cursor]
-		bracketOpen = (b == '[')
-		endOfTag = (b == ':' || b == ' ')
+		b = log.Body[cursor]
+		bracketOpen = b == '['
+		endOfTag = b == ':' || b == ' '
 
 		// XXX : parse PID ?
 		if bracketOpen {
-			tag = p.buff[from:p.cursor]
+			tag = log.Body[from:cursor]
 			found = true
 		}
 
 		if endOfTag {
 			if !found {
-				tag = p.buff[from:p.cursor]
+				tag = log.Body[from:cursor]
 				found = true
 			}
 
-			p.cursor++
+			cursor++
 			break
 		}
 
-		p.cursor++
+		cursor++
 	}
 
-	if (p.cursor < p.l) && (p.buff[p.cursor] == ' ') {
-		p.cursor++
+	if (cursor < log.Len()) && (log.Body[cursor] == ' ') {
+		cursor++
 	}
 
-	return string(tag), err
+	log.SetTag(string(tag))
+	log.SetCursor(cursor)
+
+	return err
 }
 
-func (p *Parser) parseContent() (string, error) {
-	if p.cursor > p.l {
-		return "", parser.ErrEOL
+func parseContent(log *parser.Log) error {
+	if log.Cursor() > log.Len() {
+		log.SetContent("")
+		return parser.ErrEOL
 	}
 
-	content := bytes.Trim(p.buff[p.cursor:p.l], " ")
-	p.cursor += len(content)
+	content := bytes.Trim(log.Body[log.Cursor():log.Len()], " ")
+	log.MoveCursorN(len(content))
 
-	return string(content), parser.ErrEOL
+	log.SetContent(string(content))
+	return nil
 }
 
 func fixTimestampIfNeeded(ts *time.Time) {
@@ -303,4 +281,18 @@ func fixTimestampIfNeeded(ts *time.Time) {
 		ts.Second(), ts.Nanosecond(), ts.Location())
 
 	*ts = newTs
+}
+
+func fixHostname(log *parser.Log) {
+	hostname := log.GetString("hostname")
+	if hostname != "" {
+		return
+	}
+
+	client := log.GetString("client")
+	if i := strings.Index(client, ":"); i > 1 {
+		log.SetHostname(client[:i])
+	}
+
+	log.SetHostname(client)
 }

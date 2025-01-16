@@ -6,7 +6,7 @@ import (
 
 func Test_server(t *testing.T) {
 	server := NewServer()
-	server.SetFormat(RFC3164)
+	server.SetCodec(RFC3164Codec)
 	server.SetAddr("udp://0.0.0.0:514")
 	defer func(server *Server) {
 		_ = server.Stop()

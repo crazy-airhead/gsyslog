@@ -8,7 +8,7 @@ import (
 
 // Handler The handler receive every syslog entry at Handle method
 type Handler interface {
-	Handle(log *parser.Log, err error)
+	Handle(log *parser.Log)
 }
 
 type DefaultHandler struct {
@@ -22,8 +22,8 @@ func NewDefaultHandler() *DefaultHandler {
 }
 
 // Handle entry receiver
-func (h *DefaultHandler) Handle(log *parser.Log, err error) {
+func (h *DefaultHandler) Handle(log *parser.Log) {
 	atomic.AddInt64(h.counter, 1)
 
-	logging.Infof("number %d, data:%v", *h.counter, log.Data)
+	logging.Infof("number %d, header:%v, body:%v,", *h.counter, log.Header, log.GetString(parser.LogBody))
 }
