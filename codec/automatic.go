@@ -35,6 +35,11 @@ var (
 	// 解析器
 	rfc3164Parser = rfc3164.NewParser() // RFC3164: http://www.ietf.org/rfc/rfc3164.txt
 	rfc5424Parser = rfc5424.NewParser() // RFC5424: http://www.ietf.org/rfc/rfc5424.txt
+	rfc6587Parser = rfc5424.NewParser() // RFC5424: http://www.ietf.org/rfc/rfc6587.txt
+
+	rfc3164Codec = &RFC3164Codec{} // RFC3164: http://www.ietf.org/rfc/rfc3164.txt
+	rfc5424Codec = &RFC5424Codec{} // RFC5424: http://www.ietf.org/rfc/rfc5424.txt
+	rfc6587Codec = &RFC6587Codec{} // RFC6587: http://www.ietf.org/rfc/rfc6587.txt - octet counting variant
 
 	// 错误
 	ErrIncompletePacket = errors.New("incomplete packet")
@@ -51,9 +56,18 @@ func (c *AutomaticCodec) GetParser(line []byte) parser.Parser {
 	}
 }
 
-// Decode 不需要实现，会调用具体的编码器的 Decode
-func (c *AutomaticCodec) Decode(conn gnet.Conn) ([]byte, error) {
-	return nil, nil
+func (c *AutomaticCodec) Decode(conn gnet.Conn) ([]byte, parser.Parser, error) {
+	buf, _ := conn.Next(-1)
+	switch format := detect(buf); format {
+	case RFC3164:
+		return rfc3164Codec.Decode(conn)
+	case RFC5424:
+		return rfc5424Codec.Decode(conn)
+	case RFC6587:
+		return rfc6587Codec.Decode(conn)
+	default:
+		return rfc3164Codec.Decode(conn)
+	}
 }
 
 /*

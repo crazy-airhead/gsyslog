@@ -6,6 +6,8 @@ import (
 )
 
 type Codec interface {
-	Decode(conn gnet.Conn) ([]byte, error)
+	// Decode 用于 TCP 拆包
+	Decode(conn gnet.Conn) ([]byte, parser.Parser, error)
+	// GetParser 获取解析器，用于格式解析
 	GetParser([]byte) parser.Parser
 }

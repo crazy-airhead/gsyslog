@@ -3,20 +3,19 @@ package codec
 import (
 	"encoding/binary"
 	"github.com/crazy-airhead/gsyslog/parser"
-	"github.com/crazy-airhead/gsyslog/parser/rfc5424"
 	"github.com/panjf2000/gnet/v2"
 )
 
 type RFC6587Codec struct{}
 
 func (f *RFC6587Codec) GetParser(data []byte) parser.Parser {
-	return rfc5424.NewParser()
+	return rfc6587Parser
 }
 
-func (f *RFC6587Codec) Decode(conn gnet.Conn) ([]byte, error) {
+func (f *RFC6587Codec) Decode(conn gnet.Conn) ([]byte, parser.Parser, error) {
 	if conn.InboundBuffered() < 4 {
 		// 如果没有找到换行符，说明数据不完整，等待更多数据
-		return nil, ErrIncompletePacket
+		return nil, rfc6587Parser, ErrIncompletePacket
 	}
 
 	lenBuf, _ := conn.Peek(4)
@@ -30,5 +29,5 @@ func (f *RFC6587Codec) Decode(conn gnet.Conn) ([]byte, error) {
 
 	_, _ = conn.Discard(int(length))
 
-	return nil, nil
+	return nil, rfc6587Parser, nil
 }

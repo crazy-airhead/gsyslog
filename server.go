@@ -10,10 +10,10 @@ import (
 )
 
 var (
-	RFC3164Codec   = &codec.RFC3164Codec{}   // RFC3164: http://www.ietf.org/rfc/rfc3164.txt
-	RFC5424Codec   = &codec.RFC5424Codec{}   // RFC5424: http://www.ietf.org/rfc/rfc5424.txt
-	RFC6587Codec   = &codec.RFC6587Codec{}   // RFC6587: http://www.ietf.org/rfc/rfc6587.txt - octet counting variant
-	AutomaticCodec = &codec.AutomaticCodec{} // Automatically identify the codec
+	rfc3164Codec   = &codec.RFC3164Codec{}   // RFC3164: http://www.ietf.org/rfc/rfc3164.txt
+	rfc5424Codec   = &codec.RFC5424Codec{}   // RFC5424: http://www.ietf.org/rfc/rfc5424.txt
+	rfc6587Codec   = &codec.RFC6587Codec{}   // RFC6587: http://www.ietf.org/rfc/rfc6587.txt - octet counting variant
+	automaticCodec = &codec.AutomaticCodec{} // Automatically identify the codec
 )
 
 type Server struct {
@@ -33,7 +33,7 @@ type Server struct {
 func NewServer() *Server {
 	return &Server{
 		handler:    NewDefaultHandler(),
-		codec:      AutomaticCodec,
+		codec:      automaticCodec,
 		workerPool: goroutine.Default(),
 	}
 }
@@ -120,7 +120,9 @@ func (s *Server) handleUdp(conn gnet.Conn) (action gnet.Action) {
 	copyData := make([]byte, len(data))
 	copy(copyData, data)
 	_ = s.workerPool.Submit(func() {
-		s.parser(copyData, client)
+		p := s.codec.GetParser(copyData)
+		log, _ := p.Parse(copyData, client)
+		s.handler.Handle(log)
 	})
 
 	return gnet.None
@@ -128,14 +130,15 @@ func (s *Server) handleUdp(conn gnet.Conn) (action gnet.Action) {
 
 func (s *Server) handleTcp(conn gnet.Conn) (action gnet.Action) {
 	for {
-		data, err := s.codec.Decode(conn)
+		data, p, err := s.codec.Decode(conn)
 		if err != nil {
 			break
 		}
 
 		client := conn.RemoteAddr().String()
 		_ = s.workerPool.Submit(func() {
-			s.parser(data, client)
+			log, _ := p.Parse(data, client)
+			s.handler.Handle(log)
 		})
 
 		return gnet.None
@@ -149,12 +152,4 @@ func (s *Server) handleTcp(conn gnet.Conn) (action gnet.Action) {
 	}
 
 	return gnet.None
-
-}
-
-func (s *Server) parser(line []byte, client string) {
-	parser := s.codec.GetParser(line)
-	log, _ := parser.Parse(line, client)
-
-	s.handler.Handle(log)
 }

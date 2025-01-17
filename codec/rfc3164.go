@@ -11,7 +11,7 @@ func (f *RFC3164Codec) GetParser(data []byte) parser.Parser {
 	return rfc3164Parser
 }
 
-func (f *RFC3164Codec) Decode(conn gnet.Conn) ([]byte, error) {
+func (f *RFC3164Codec) Decode(conn gnet.Conn) ([]byte, parser.Parser, error) {
 	buf, _ := conn.Next(-1)
 
 	length := len(buf)
@@ -20,5 +20,5 @@ func (f *RFC3164Codec) Decode(conn gnet.Conn) ([]byte, error) {
 
 	_, _ = conn.Discard(length)
 
-	return body, nil
+	return body, rfc3164Parser, nil
 }
