@@ -1,9 +1,11 @@
 package codec
 
 import (
-	"bufio"
 	"bytes"
+	"errors"
 	"github.com/crazy-airhead/gsyslog/parser"
+	"github.com/crazy-airhead/gsyslog/parser/rfc3164"
+	"github.com/crazy-airhead/gsyslog/parser/rfc5424"
 	"github.com/panjf2000/gnet/v2"
 	"strconv"
 )
@@ -29,6 +31,15 @@ const (
 	RFC6587 = iota
 )
 
+var (
+	// 解析器
+	rfc3164Parser = rfc3164.NewParser() // RFC3164: http://www.ietf.org/rfc/rfc3164.txt
+	rfc5424Parser = rfc5424.NewParser() // RFC5424: http://www.ietf.org/rfc/rfc5424.txt
+
+	// 错误
+	ErrIncompletePacket = errors.New("incomplete packet")
+)
+
 func (c *AutomaticCodec) GetParser(line []byte) parser.Parser {
 	switch format := detect(line); format {
 	case RFC3164:
@@ -40,6 +51,7 @@ func (c *AutomaticCodec) GetParser(line []byte) parser.Parser {
 	}
 }
 
+// Decode 不需要实现，会调用具体的编码器的 Decode
 func (c *AutomaticCodec) Decode(conn gnet.Conn) ([]byte, error) {
 	return nil, nil
 }
@@ -75,21 +87,4 @@ func detect(data []byte) int {
 
 	// fallback to rfc 3164 section 4.3.3
 	return RFC3164
-}
-
-func (c *AutomaticCodec) automaticScannerSplit(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-
-	switch format := detect(data); format {
-	case RFC6587:
-		return rfc6587ScannerSplit(data, atEOF)
-	case RFC3164, RFC5424:
-		// the default
-		return bufio.ScanLines(data, atEOF)
-	default:
-		// Request more data
-		return 0, nil, err
-	}
 }
